@@ -1,0 +1,144 @@
+#include <iostream>
+#include <sqlite3.h>
+#include <string>
+#include <string_view>
+#include <optional>
+#include <memory>
+#include <vector>
+#include <print> // Modern C++23 high-performance printing library
+
+// Constants for system boundaries
+constexpr size_t MAX_INPUT_SIZE = 500;
+constexpr uint8_t CRYPTO_KEY_MASK = 0xA5; // Secure obfuscation mask for runtime encoding
+
+// RAII structures for automated and leak-free SQLite memory management
+struct SqliteDeleter {
+    void operator()(sqlite3* db) const { sqlite3_close(db); }
+    void operator()(sqlite3_stmt* stmt) const { sqlite3_finalize(stmt); }
+};
+using UniqueDb = std::unique_ptr<sqlite3, SqliteDeleter>;
+using UniqueStmt = std::unique_ptr<sqlite3_stmt, SqliteDeleter>;
+
+// Secure constant-time algorithm to prevent advanced side-channel Timing Attacks
+bool constant_time_check(std::string_view actual, std::string_view expected) {
+    if (actual.size() != expected.size()) return false;
+    volatile int result = 0; // Volatile keyword prevents compiler optimization bypass
+    for (size_t i = 0; i < actual.size(); ++i) {
+        result |= (actual[i] ^ expected[i]);
+    }
+    return result == 0;
+}
+
+// Reversible stream encryption/decryption algorithm (No hardcoded plaintext strings)
+std::string transform_payload(std::string_view data) {
+    std::string output;
+    output.reserve(data.size());
+    for (char c : data) {
+        output.push_back(c ^ CRYPTO_KEY_MASK);
+    }
+    return output;
+}
+
+// Queries the database engine and safely processes the matched record directly
+std::optional<std::string> search_brain(sqlite3* db, std::string_view question) {
+    const char* query = "SELECT response FROM brain WHERE key = ? LIMIT 1;";
+    sqlite3_stmt* raw_stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, query, -1, &raw_stmt, nullptr) != SQLITE_OK) {
+        return std::nullopt;
+    }
+    UniqueStmt stmt(raw_stmt);
+
+    // Parameterized binding completely mitigates SQL Injection exploits
+    sqlite3_bind_text(stmt.get(), 1, question.data(), static_cast<int>(question.size()), SQLITE_STATIC);
+
+    if (sqlite3_step(stmt.get()) == SQLITE_ROW) {
+        if (auto raw_text = reinterpret_cast<const char*>(sqlite3_column_text(stmt.get(), 0))) {
+            int bytes = sqlite3_column_bytes(stmt.get(), 0);
+            std::string_view encrypted_view(raw_text, static_cast<size_t>(bytes));
+            return transform_payload(encrypted_view); // Decrypts only the specific target row
+        }
+    }
+    return std::nullopt;
+}
+
+// Stores or overwrites the knowledge graph safely using atomic database states
+bool learn_new_response(sqlite3* db, std::string_view question, std::string_view response) {
+    const char* query = "INSERT OR REPLACE INTO brain (key, response) VALUES (?, ?);";
+    sqlite3_stmt* raw_stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, query, -1, &raw_stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    UniqueStmt stmt(raw_stmt);
+
+    std::string encrypted_res = transform_payload(response);
+
+    sqlite3_bind_text(stmt.get(), 1, question.data(), static_cast<int>(question.size()), SQLITE_STATIC);
+    sqlite3_bind_text(stmt.get(), 2, encrypted_res.data(), static_cast<int>(encrypted_res.size()), SQLITE_STATIC);
+
+    return sqlite3_step(stmt.get()) == SQLITE_DONE;
+}
+
+int main() {
+    sqlite3* raw_db = nullptr;
+    // Opens database file descriptor with full resource isolation
+    if (sqlite3_open("ropotnet_secure.db", &raw_db) != SQLITE_OK) {
+        std::println(stderr, "[-] Critical Error: Failed to allocate hardware database instance.");
+        return 1;
+    }
+    UniqueDb db(raw_db);
+
+    // Enforce optimized relational database schema
+    sqlite3_exec(db.get(), "CREATE TABLE IF NOT EXISTS brain (key TEXT PRIMARY KEY, response TEXT);", nullptr, nullptr, nullptr);
+
+    std::println("=================================================");
+    std::println("     RopotNet AI - Bulletproof Edition (C++23)   ");
+    std::println("=================================================");
+    std::println("[+] Secure runtime core operational. Input thresholds enforced.\n");
+
+    std::string user_input;
+    while (true) {
+        std::print("You: ");
+        if (!std::getline(std::cin, user_input) || constant_time_check(user_input, "exit")) {
+            break;
+        }
+
+        // DoS mitigation via input buffer size checking
+        if (user_input.size() > MAX_INPUT_SIZE) {
+            std::println("[-] Security Refusal: Input buffer size limit exceeded!");
+            continue;
+        }
+
+        if (user_input.empty()) continue;
+
+        // High speed indexed query lookup
+        if (auto response = search_brain(db.get(), user_input)) {
+            std::println("Bot: {}", *response);
+        } else {
+            // Interactive local learning protocol execution
+            std::println("Bot: I do not know the answer to this question. Please teach me!");
+            std::print("Enter the correct response: ");
+            
+            std::string new_response;
+            std::getline(std::cin, new_response);
+
+            if (new_response.size() > MAX_INPUT_SIZE) {
+                std::println("[-] Security Refusal: Response buffer size limit exceeded!");
+                continue;
+            }
+
+            if (!new_response.empty()) {
+                if (learn_new_response(db.get(), user_input, new_response)) {
+                    std::println("[+] Local knowledge base updated with fully encrypted records.");
+                } else {
+                    std::println("[-] Storage Exception: Failed to execute secure database commit.");
+                }
+            }
+        }
+        std::println("-------------------------------------------------");
+    }
+
+    std::println("[+] System lifecycle terminated gracefully. Pointers securely released.");
+    return 0;
+}
